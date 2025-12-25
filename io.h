@@ -69,8 +69,8 @@ io_data_t *io_get_data(struct io_uring_cqe *cqe);
 
 void io_free_data(struct io_uring_cqe *cqe);
 
-uint8_t *io_get_recv_buffer(struct io_uring_cqe *cqe);
+uint8_t *io_get_recv_result(io_t *io, struct io_uring_cqe *cqe);
 
-ssize_t io_get_recv_buffer_len(struct io_uring_cqe *cqe);
+ssize_t io_get_recv_result_len(struct io_uring_cqe *cqe);
 
 #endif

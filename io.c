@@ -1,6 +1,7 @@
 #include "io.h"
 #include "util.h"
 #include <liburing.h>
+#include <liburing/io_uring.h>
 #include <stdlib.h>
 #include <stddef.h>
 #include <string.h>
@@ -282,14 +283,67 @@ ret_err:
 	return -1;
 }
 
-int io_submit_close(io_t *io, int fd);
+int io_submit_close(io_t *io, int fd)
+{
+	io_data_t *io_data;
+	struct io_uring_sqe *sqe;
+
+	io_data = _io_data_alloc(&io->pool);
+	if (io_data == NULL)
+		goto ret_err;
+	_io_data_prep(io_data, OP_CLOSE, fd);
+
+	sqe = io_uring_get_sqe(&io->ring);
+	if (sqe == NULL)
+		goto iod_free;
+	io_uring_prep_close(sqe, fd);
+	io_uring_sqe_set_data(sqe, io_data);
+
+	return 0;
+
+iod_free:
+	_io_data_free(&io->pool, io_data);
+ret_err:
+	return -1;
+}
 
 int io_submit_cancel(io_t *io, int fd);
 
-io_data_t *io_get_data(struct io_uring_cqe *cqe);
+io_data_t *io_get_data(struct io_uring_cqe *cqe)
+{
+	if (cqe == NULL)
+		return NULL;
+
+	return (io_data_t *)cqe->user_data;
+}
 
 void io_free_data(struct io_uring_cqe *cqe);
 
-uint8_t *io_get_recv_buffer(struct io_uring_cqe *cqe);
+uint8_t *io_get_recv_result(io_t *io, struct io_uring_cqe *cqe)
+{
+	if (cqe == NULL)
+		return NULL;
 
-ssize_t io_get_recv_buffer_len(struct io_uring_cqe *cqe);
+	if (cqe->res <= 0)
+		return NULL;
+
+	io_data_t *io_data = io_get_data(cqe);
+	if (io_data == NULL)
+		return NULL;
+	if (io_data->op != OP_RECV)
+		return NULL;
+
+	int bid = cqe->flags >> IORING_CQE_BUFFER_SHIFT;
+	uint8_t *data_ptr = io->buffer_pool + (bid * IO_BUF_LEN);
+	return data_ptr;
+}
+
+ssize_t io_get_recv_result_len(struct io_uring_cqe *cqe)
+{
+	io_data_t *io_data = io_get_data(cqe);
+	if (io_data == NULL)
+		return -1;
+	if (io_data->op != OP_RECV)
+		return -1;
+	return cqe->res;
+}
