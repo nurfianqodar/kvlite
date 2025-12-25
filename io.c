@@ -1,7 +1,8 @@
+#define _GNU_SOURCE
+
 #include "io.h"
 #include "util.h"
 #include <liburing.h>
-#include <liburing/io_uring.h>
 #include <stdlib.h>
 #include <stddef.h>
 #include <string.h>
@@ -307,7 +308,36 @@ ret_err:
 	return -1;
 }
 
-int io_submit_cancel(io_t *io, int fd);
+int io_submit_cancel(io_t *io, int fd)
+{
+	io_data_t *io_data;
+	struct io_uring_sqe *sqe;
+
+	io_data = _io_data_alloc(&io->pool);
+	if (io_data == NULL)
+		goto ret_err;
+	_io_data_prep(io_data, OP_CANCEL, fd);
+
+	sqe = io_uring_get_sqe(&io->ring);
+	if (sqe == NULL)
+		goto iod_free;
+	io_uring_prep_close(sqe, fd);
+	io_uring_sqe_set_data(sqe, io_data);
+
+	return 0;
+
+iod_free:
+	_io_data_free(&io->pool, io_data);
+ret_err:
+	return -1;
+}
+
+int io_submit(io_t *io)
+{
+	int submited;
+	submited = io_uring_submit(&io->ring);
+	return submited;
+}
 
 io_data_t *io_get_data(struct io_uring_cqe *cqe)
 {
@@ -317,7 +347,14 @@ io_data_t *io_get_data(struct io_uring_cqe *cqe)
 	return (io_data_t *)cqe->user_data;
 }
 
-void io_free_data(struct io_uring_cqe *cqe);
+void io_free_data(io_t *io, struct io_uring_cqe *cqe)
+{
+	if (cqe == NULL)
+		return;
+
+	io_data_t *io_data = io_get_data(cqe);
+	_io_data_free(&io->pool, io_data);
+}
 
 uint8_t *io_get_recv_result(io_t *io, struct io_uring_cqe *cqe)
 {

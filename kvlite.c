@@ -1,4 +1,9 @@
+#include "server.h"
 int main()
 {
-    return 0;
+	server_t s;
+
+	server_init(&s, "127.0.0.1", 9, 8000);
+	server_start(&s);
+	return 0;
 }

@@ -65,9 +65,11 @@ int io_submit_close(io_t *io, int fd);
 
 int io_submit_cancel(io_t *io, int fd);
 
+int io_submit(io_t *io);
+
 io_data_t *io_get_data(struct io_uring_cqe *cqe);
 
-void io_free_data(struct io_uring_cqe *cqe);
+void io_free_data(io_t *io, struct io_uring_cqe *cqe);
 
 uint8_t *io_get_recv_result(io_t *io, struct io_uring_cqe *cqe);
 

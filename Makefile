@@ -2,7 +2,7 @@ CC 		:= clang
 CFLAGS	:= -Wall -g -O2
 CLIBS	:= -luring -ljemalloc
 TARGET 	:= kvlite
-SRCS	:= kvlite.c io.c util.c
+SRCS	:= kvlite.c io.c util.c server.c
 OBJS	:= $(SRCS:.c=.o)
 
 all: $(TARGET)
