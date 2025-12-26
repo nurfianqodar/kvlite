@@ -1,6 +1,5 @@
 #include "server.h"
 #include "io.h"
-#include <asm-generic/socket.h>
 #include <liburing.h>
 #include <signal.h>
 #include <stddef.h>
@@ -12,14 +11,18 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
+// main loop stopper
 static volatile sig_atomic_t stop = 0;
 
+// Stop main loop
 static void on_sigint(int sig)
 {
 	(void)sig;
 	stop = 1;
 }
 
+/* bind server to address
+ * return -1 if error */
 static int _server_bind(server_t *server)
 {
 	if (server == NULL)
@@ -36,14 +39,92 @@ static int _server_bind(server_t *server)
 	ret = inet_aton((char *)server->host, &addr.sin_addr);
 	if (ret < 0)
 		return -1;
+
 	ret = bind(server->fd, (struct sockaddr *)&addr, sizeof addr);
 	if (ret < 0)
 		return -1;
 	return 0;
 }
 
+static void _server_on_accept(server_t *server, struct io_uring_cqe *cqe)
+{
+	int clfd;
+	int ret;
+
+	clfd = cqe->res;
+	if (clfd < 0)
+		return;
+
+	ret = io_submit_recv_multishot(&server->io, clfd);
+	if (ret < 0) {
+		io_submit_close(&server->io, clfd);
+		return;
+	}
+}
+
+/* handle read result
+ *
+ * this is place for parsing request and write response
+ */
+static void _server_on_recv(server_t *server, struct io_uring_cqe *cqe)
+{
+	int ret;
+	ssize_t recvn;
+	unsigned short bid;
+	uint8_t *recv_buf;
+	uint8_t *send_buf;
+	io_data_t *io_data;
+
+	io_data = io_get_data(cqe);
+
+	recvn = cqe->res;
+	bid = io_get_recv_buffer_id(cqe);
+	recv_buf = io_get_recv_buffer(&server->io, bid);
+	if (recvn <= 0) {
+		io_submit_close(&server->io, io_data->fd);
+		io_free_data(&server->io, cqe);
+		goto cleanup;
+	}
+
+	send_buf = malloc(recvn * sizeof(uint8_t));
+	if (send_buf == NULL)
+		goto cleanup;
+	memcpy(send_buf, recv_buf, recvn);
+	ret = io_submit_send(&server->io, io_data->fd, send_buf, recvn);
+	if (ret < 0) {
+		free(send_buf);
+	}
+
+cleanup:
+	io_recycle_recv_buffer(&server->io, bid);
+}
+
+/* handle server write result
+ *
+ * on write task cqe->user_data is write buffer
+ * allocated on heap, so we should free cqe->user_data
+ * TODO: create response pool so the response is gonna be allocated
+ * on response pool
+ *
+ */
+static void _server_on_send(server_t *server, struct io_uring_cqe *cqe)
+{
+	io_data_t *io_data;
+	uint8_t *send_buf;
+
+	io_data = io_get_data(cqe);
+
+	send_buf = io_data->data;
+	if (send_buf != NULL)
+		free(send_buf);
+
+	io_free_data(&server->io, cqe);
+}
+
 static void _server_handle_cqe(server_t *server, struct io_uring_cqe *cqe)
 {
+	if (stop)
+		return;
 	io_data_t *io_data = io_get_data(cqe);
 
 	switch (io_data->op) {
@@ -60,61 +141,36 @@ static void _server_handle_cqe(server_t *server, struct io_uring_cqe *cqe)
 	}
 
 	case OP_ACCEPT: {
-		int clfd;
-		int ret;
-
-		clfd = cqe->res;
-		if (clfd < 0)
-			break;
-
-		ret = io_submit_recv_multishot(&server->io, clfd);
-		if (ret < 0) {
-			io_submit_close(&server->io, clfd);
-			break;
-		}
+		_server_on_accept(server, cqe);
+		break;
 	}
 
 	case OP_RECV: {
-		int ret;
-		ssize_t recvn;
-		unsigned short bid;
-		uint8_t *recv_buf;
-		uint8_t *send_buf;
-
-		recvn = cqe->res;
-		bid = io_get_recv_buffer_id(cqe);
-		recv_buf = io_get_recv_buffer(&server->io, bid);
-		if (recvn <= 0) {
-			io_submit_close(&server->io, io_data->fd);
-			io_free_data(&server->io, cqe);
-			goto cleanup;
-		}
-
-		send_buf = malloc(recvn * sizeof(uint8_t));
-		if (send_buf == NULL)
-			goto cleanup;
-		memcpy(send_buf, recv_buf, recvn);
-		ret = io_submit_send(&server->io, io_data->fd, send_buf, recvn);
-		if (ret < 0) {
-			free(send_buf);
-		}
-
-cleanup:
-		io_recycle_recv_buffer(&server->io, bid);
+		_server_on_recv(server, cqe);
 		break;
 	}
 
 	case OP_SEND: {
-		uint8_t *send_buf;
-
-		send_buf = io_data->data;
-		if (send_buf != NULL)
-			free(send_buf);
+		_server_on_send(server, cqe);
 		break;
 	}
 
 	} // end switch
 }
+
+// clean up all server attributes
+void _server_cleanup(server_t *server)
+{
+	printf("clean up server\n");
+	if (server == NULL)
+		return;
+
+	if (server->fd >= 0)
+		close(server->fd);
+	io_free(&server->io);
+}
+
+// PUBLIC API
 
 int server_init(server_t *server, const char *host, size_t host_len,
 		uint16_t port)
@@ -204,5 +260,6 @@ int server_start(server_t *server)
 		io_uring_cqe_seen(&server->io.ring, cqe);
 
 	} // end loop
+	_server_cleanup(server);
 	return 0;
 }

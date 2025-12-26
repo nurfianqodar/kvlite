@@ -1,4 +1,3 @@
-#include <liburing/io_uring.h>
 #define _GNU_SOURCE
 
 #include "io.h"
@@ -10,7 +9,9 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+// =================================================
 // private API's
+// =================================================
 
 static int _io_data_pool_init(io_data_pool_t *io_data_pool, size_t cap)
 {
@@ -171,12 +172,14 @@ ret_err:
 	return -1;
 }
 
+// =================================================
 // public API's
+// =================================================
 
-// io utilities initialization
-// signature:
-// int io_init(io_t *io, size_t pool_size, unsigned int conc, size_t nrbuf, size_t buf_len);
-
+/* io utilities initialization
+ * signature:
+ * `int io_init(io_t *io, size_t pool_size, unsigned int conc, size_t nrbuf, size_t buf_len);`
+ */
 int io_init(io_t *io, size_t pool_size, unsigned int conc, size_t nrbuf,
 	    size_t buf_len)
 {
@@ -211,12 +214,18 @@ void io_free(io_t *io)
 	if (io == NULL)
 		return;
 
+	struct io_uring_cqe *cqe;
+	while (io_uring_peek_cqe(&io->ring, &cqe) == 0) {
+		io_uring_cqe_seen(&io->ring, cqe);
+	}
+
 	io_uring_unregister_buf_ring(&io->ring, IO_BGID_READ);
 	io_uring_queue_exit(&io->ring);
 	if (io->buffer_ring) {
 		free(io->buffer_ring);
 		io->buffer_ring = NULL;
 	}
+
 	if (io->buffer_ring_meta) {
 		free(io->buffer_ring_meta);
 		io->buffer_ring_meta = NULL;

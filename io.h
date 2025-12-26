@@ -26,26 +26,22 @@ typedef enum io_op_e {
 	OP_CLOSE,
 } io_op_t;
 
-typedef union io_ctx_u {
-	struct {
-	} read;
-
-	struct {
-		unsigned short read_bid; /* read buffer id */
-	} write;
-
-	struct {
-	} null;
-} io_ctx_t;
-
 typedef struct io_data_s {
 	io_op_t op; /* operation id */
 	int fd; /* file descriptor */
 	struct sockaddr_storage addr; /* fd address */
 	socklen_t addr_len; /* address size */
-	void *data; /* pointer to write buffer. ONLY USE ON WRITE */
-	struct io_data_s *_next; /* free list uitl
-                                contains POISON_PTR if used */
+
+	/* this is pointer to data based on op
+     * data type is:
+     * request on OP_RECV
+     * response on OP_WRITE
+     * and so on... maybe more..
+     * */
+	void *data;
+
+	/* free list uitl contains POISON_PTR if used */
+	struct io_data_s *_next;
 } io_data_t;
 
 typedef struct io_data_pool_s {
@@ -57,7 +53,10 @@ typedef struct io_data_pool_s {
 typedef struct io_s {
 	io_data_pool_t pool; /* io data pool */
 	struct io_uring ring; /* io uring ring */
-	struct io_uring_buf_ring *buffer_ring_meta; /* io uring buffers */
+
+	/* io uring recv/read buffers */
+	struct io_uring_buf_ring *buffer_ring_meta;
+
 	uint8_t *buffer_ring; /* io uring buffer data */
 	size_t buffer_ring_size;
 	uint16_t buffer_ring_tail;
