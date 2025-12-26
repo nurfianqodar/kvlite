@@ -26,6 +26,18 @@ typedef enum io_op_e {
 	OP_CLOSE,
 } io_op_t;
 
+typedef union io_ctx_u {
+	struct {
+	} read;
+
+	struct {
+		unsigned short read_bid; /* read buffer id */
+	} write;
+
+	struct {
+	} null;
+} io_ctx_t;
+
 typedef struct io_data_s {
 	io_op_t op; /* operation id */
 	int fd; /* file descriptor */
@@ -45,11 +57,16 @@ typedef struct io_data_pool_s {
 typedef struct io_s {
 	io_data_pool_t pool; /* io data pool */
 	struct io_uring ring; /* io uring ring */
-	struct io_uring_buf_ring *br; /* io uring buffers */
-	uint8_t *buffer_pool;
+	struct io_uring_buf_ring *buffer_ring_meta; /* io uring buffers */
+	uint8_t *buffer_ring; /* io uring buffer data */
+	size_t buffer_ring_size;
+	uint16_t buffer_ring_tail;
+	size_t buffer_len;
+	uint16_t nrbuf;
 } io_t;
 
-int io_init(io_t *io, size_t pool_size, unsigned int conc);
+int io_init(io_t *io, size_t pool_size, unsigned int conc, size_t nrbuf,
+	    size_t buf_len);
 
 void io_free(io_t *io);
 
@@ -67,12 +84,18 @@ int io_submit_cancel(io_t *io, int fd);
 
 int io_submit(io_t *io);
 
+int io_submit_and_wait(io_t *io);
+
 io_data_t *io_get_data(struct io_uring_cqe *cqe);
 
 void io_free_data(io_t *io, struct io_uring_cqe *cqe);
 
-uint8_t *io_get_recv_result(io_t *io, struct io_uring_cqe *cqe);
+uint8_t *io_get_recv_buffer(io_t *io, unsigned short bid);
 
-ssize_t io_get_recv_result_len(struct io_uring_cqe *cqe);
+ssize_t io_get_recv_buffer_len(struct io_uring_cqe *cqe);
+
+unsigned short io_get_recv_buffer_id(struct io_uring_cqe *cqe);
+
+void io_recycle_recv_buffer(io_t *io, unsigned short bid);
 
 #endif

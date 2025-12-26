@@ -1,3 +1,4 @@
+#include <liburing/io_uring.h>
 #define _GNU_SOURCE
 
 #include "io.h"
@@ -107,10 +108,81 @@ static int _io_data_prep(io_data_t *io_data, io_op_t op, int fd)
 	return 0;
 }
 
+static int _io_create_buffer_ring(io_t *io, size_t nrbuf, size_t buf_len,
+				  int buf_gid)
+{
+	const size_t ALIGNMENT = 4096;
+	const size_t BUFFER_RING_METADATA_SIZE =
+		nrbuf * sizeof(struct io_uring_buf);
+	const size_t BUFFER_RING_SIZE = nrbuf * buf_len;
+
+	int ret;
+	struct io_uring_buf_reg reg;
+
+	// Allocate buffer ring metadata
+	// assign io->buffer_ring_meta
+	ret = posix_memalign((void *)&io->buffer_ring_meta, ALIGNMENT,
+			     BUFFER_RING_METADATA_SIZE);
+	if (ret != 0)
+		goto ret_err;
+
+	reg = (struct io_uring_buf_reg){
+		.bgid = buf_gid,
+		.ring_addr = (unsigned long)io->buffer_ring_meta,
+		.ring_entries = nrbuf,
+	};
+
+	// register to ring
+	ret = io_uring_register_buf_ring(&io->ring, &reg, 0);
+	if (ret < 0)
+		goto clear_meta;
+
+	// Allocate buffer ring
+	// assign io->buffer_ring
+	ret = posix_memalign((void *)&io->buffer_ring, ALIGNMENT,
+			     BUFFER_RING_SIZE);
+	if (ret != 0)
+		goto unreg_meta;
+
+	io->buffer_ring_tail = 0;
+	io->buffer_ring_size = BUFFER_RING_SIZE;
+
+	// populate buffer ring
+	int mask = io_uring_buf_ring_mask(nrbuf);
+	for (int i = 0; i < nrbuf; i++) {
+		uint8_t *cur_addr = (uint8_t *)io->buffer_ring +
+				    (i * buf_len); /* current buffer address
+                                      add */
+		unsigned short buffer_id = i;
+		int offset = i;
+		io_uring_buf_ring_add(io->buffer_ring_meta, cur_addr, buf_len,
+				      buffer_id, mask, offset);
+		io->buffer_ring_tail++;
+	}
+	// publish to kernel
+	io_uring_buf_ring_advance(io->buffer_ring_meta, nrbuf);
+	return 0;
+
+unreg_meta:
+	io_uring_unregister_buf_ring(&io->ring, buf_gid);
+clear_meta:
+	free(io->buffer_ring_meta);
+ret_err:
+	return -1;
+}
+
 // public API's
-int io_init(io_t *io, size_t pool_size, unsigned int conc)
+
+// io utilities initialization
+// signature:
+// int io_init(io_t *io, size_t pool_size, unsigned int conc, size_t nrbuf, size_t buf_len);
+
+int io_init(io_t *io, size_t pool_size, unsigned int conc, size_t nrbuf,
+	    size_t buf_len)
 {
 	int ret;
+	unsigned short buffer_gid = 1;
+
 	ret = io_uring_queue_init(conc, &io->ring, 0);
 	if (ret != 0)
 		goto ret_err;
@@ -120,45 +192,12 @@ int io_init(io_t *io, size_t pool_size, unsigned int conc)
 		goto ring_clear;
 
 	// buffer ring initialization
-
-	// ring metadata allocation
-	size_t ring_size = IO_NRBUFS * sizeof(struct io_uring_buf);
-	ret = posix_memalign((void **)&io->br, 4096, ring_size);
-	if (ret != 0)
+	ret = _io_create_buffer_ring(io, nrbuf, buf_len, buffer_gid);
+	if (ret < 0)
 		goto pool_clear;
 
-	// register buf ring to ring
-	struct io_uring_buf_reg reg = {
-		.ring_addr = (unsigned long)io->br,
-		.ring_entries = IO_NRBUFS,
-		.bgid = IO_BGID_READ,
-	};
-	ret = io_uring_register_buf_ring(&io->ring, &reg, 0);
-	if (ret < 0)
-		goto br_clear;
-
-	// buffer ring pool allocation
-	size_t buffer_pool_size = IO_NRBUFS * IO_BUF_LEN;
-	ret = posix_memalign((void **)&io->buffer_pool, 4096, buffer_pool_size);
-	if (ret != 0)
-		goto br_unreg;
-
-	// populate buffer ring
-	io_uring_buf_ring_init(io->br);
-	for (int i = 0; i < IO_NRBUFS; i++) {
-		void *this_buffer_addr = io->buffer_pool + (i * IO_BUF_LEN);
-		io_uring_buf_ring_add(io->br, this_buffer_addr, IO_BUF_LEN, i,
-				      io_uring_buf_ring_mask(IO_NRBUFS), i);
-	}
-
-	// publish to kernel
-	io_uring_buf_ring_advance(io->br, IO_NRBUFS);
 	return 0;
 
-br_unreg: // buffer ring unregister
-	io_uring_unregister_buf_ring(&io->ring, IO_BGID_READ);
-br_clear: // buffer ring metadata clear
-	free(io->br);
 pool_clear:
 	_io_data_pool_free(&io->pool);
 ring_clear:
@@ -174,13 +213,13 @@ void io_free(io_t *io)
 
 	io_uring_unregister_buf_ring(&io->ring, IO_BGID_READ);
 	io_uring_queue_exit(&io->ring);
-	if (io->buffer_pool) {
-		free(io->buffer_pool);
-		io->buffer_pool = NULL;
+	if (io->buffer_ring) {
+		free(io->buffer_ring);
+		io->buffer_ring = NULL;
 	}
-	if (io->br) {
-		free(io->br);
-		io->br = NULL;
+	if (io->buffer_ring_meta) {
+		free(io->buffer_ring_meta);
+		io->buffer_ring_meta = NULL;
 	}
 	_io_data_pool_free(&io->pool);
 }
@@ -339,6 +378,11 @@ int io_submit(io_t *io)
 	return submited;
 }
 
+int io_submit_and_wait(io_t *io)
+{
+	return io_uring_submit_and_wait(&io->ring, 1);
+}
+
 io_data_t *io_get_data(struct io_uring_cqe *cqe)
 {
 	if (cqe == NULL)
@@ -356,26 +400,13 @@ void io_free_data(io_t *io, struct io_uring_cqe *cqe)
 	_io_data_free(&io->pool, io_data);
 }
 
-uint8_t *io_get_recv_result(io_t *io, struct io_uring_cqe *cqe)
+uint8_t *io_get_recv_buffer(io_t *io, unsigned short bid)
 {
-	if (cqe == NULL)
-		return NULL;
-
-	if (cqe->res <= 0)
-		return NULL;
-
-	io_data_t *io_data = io_get_data(cqe);
-	if (io_data == NULL)
-		return NULL;
-	if (io_data->op != OP_RECV)
-		return NULL;
-
-	int bid = cqe->flags >> IORING_CQE_BUFFER_SHIFT;
-	uint8_t *data_ptr = io->buffer_pool + (bid * IO_BUF_LEN);
+	uint8_t *data_ptr = io->buffer_ring + (bid * IO_BUF_LEN);
 	return data_ptr;
 }
 
-ssize_t io_get_recv_result_len(struct io_uring_cqe *cqe)
+ssize_t io_get_recv_buffer_len(struct io_uring_cqe *cqe)
 {
 	io_data_t *io_data = io_get_data(cqe);
 	if (io_data == NULL)
@@ -383,4 +414,20 @@ ssize_t io_get_recv_result_len(struct io_uring_cqe *cqe)
 	if (io_data->op != OP_RECV)
 		return -1;
 	return cqe->res;
+}
+
+unsigned short io_get_recv_buffer_id(struct io_uring_cqe *cqe)
+{
+	return cqe->flags >> IORING_CQE_BUFFER_SHIFT;
+}
+
+void io_recycle_recv_buffer(io_t *io, unsigned short bid)
+{
+	uint8_t *addr = (uint8_t *)io->buffer_ring + (bid * IO_BUF_LEN);
+	io_uring_buf_ring_add(io->buffer_ring_meta, addr, io->buffer_len, bid,
+			      io_uring_buf_ring_mask(io->nrbuf),
+			      io->buffer_ring_tail);
+
+	io->buffer_ring_tail++;
+	io_uring_buf_ring_advance(io->buffer_ring_meta, 1);
 }
