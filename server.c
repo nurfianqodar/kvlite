@@ -121,6 +121,10 @@ int server_init(server_t *server, const char *host, size_t host_len,
 {
 	// save host as null terminated string
 	int ret;
+	size_t IO_CONCURENCY = 1024;
+	size_t IO_DATA_POOL_SIZE = 2048;
+	size_t IO_NRBUF = 256;
+	size_t IO_BUFFER_SIZE = 4096;
 	if (host_len > 46) {
 		goto ret_err;
 	}
@@ -129,7 +133,8 @@ int server_init(server_t *server, const char *host, size_t host_len,
 	server->port = port;
 
 	// initialize io utils
-	ret = io_init(&server->io, 2048, 512, 2, 4096);
+	ret = io_init(&server->io, IO_DATA_POOL_SIZE, IO_CONCURENCY, IO_NRBUF,
+		      IO_BUFFER_SIZE);
 	if (ret < 0)
 		goto ret_err;
 
