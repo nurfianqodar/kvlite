@@ -1,10 +1,12 @@
 CC		:= clang
-CFLAGS	:= -Wall -Wextra -O3
+CFLAGS	:= -Wall -Wextra -O3 -g
 CLIBS	:= -luring -ljemalloc
 
 TARGET	:= kvlite
-SRCS	:= kvlite.c
+SRCS	:= kvlite.c util.c task.c server.c
 OBJS	:= $(SRCS:.c=.o)
+
+all: $(TARGET)
 
 $(TARGET): $(OBJS)
 	$(CC) -o $@ $^ $(CFLAGS) $(CLIBS)
