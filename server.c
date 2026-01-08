@@ -1,4 +1,5 @@
 #include "server.h"
+#include "request.h"
 #include "task.h"
 #include <asm-generic/socket.h>
 #include <liburing.h>
@@ -36,60 +37,106 @@ static int activate_on_sigint()
 	return 0;
 }
 
+static bool on_cqe_accept(server_t *s, struct io_uring_cqe *cqe)
+{
+	task_t *task = io_uring_cqe_get_data(cqe);
+	if (cqe->res < 0) {
+		task_free(task);
+		return false;
+	}
+	task_t *recv_task = task_new_recv(cqe->res, 8192);
+	create_submission(&s->ring, recv_task);
+	return true;
+}
+
+static bool on_cqe_recv(server_t *s, struct io_uring_cqe *cqe)
+{
+	task_t *task = io_uring_cqe_get_data(cqe);
+	if (cqe->res <= 0) {
+		task_t *close_task = task_new_close(task->fd);
+		create_submission(&s->ring, close_task);
+		task_free(task);
+		return true;
+	}
+
+	recv_data_t *recv_data = task_recv_get_data(task);
+	recv_data->recvd_len += cqe->res;
+	int ret = request_parse(&recv_data->request, recv_data->buf,
+				recv_data->recvd_len);
+	if (ret == REQ_ERR_TOO_SHORT) {
+		// Re read buffer
+		// the offset is autoupdated based on recvd_len
+		create_submission(&s->ring, task);
+		return true;
+	} else if (ret == 0) {
+		// handle request
+        request_t *request = &recv_data->request;
+		request_debug(request);
+
+		const char *msg = "ok";
+		size_t msg_len = strlen(msg);
+		task_t *send_task =
+			task_new_send(task->fd, (uint8_t *)msg, msg_len);
+		create_submission(&s->ring, send_task);
+		task_free(task);
+		return true;
+	} else {
+		// request error
+		const char *msg = "bad request\n";
+		size_t msg_len = strlen(msg);
+		task_t *send_task =
+			task_new_send(task->fd, (uint8_t *)msg, msg_len);
+		create_submission(&s->ring, send_task);
+		task_free(task);
+		return true;
+	}
+
+	return true;
+}
+
+static bool on_cqe_send(server_t *s, struct io_uring_cqe *cqe)
+{
+	task_t *task = io_uring_cqe_get_data(cqe);
+	if (cqe->res < 0) {
+		task_t *close_task = task_new_close(task->fd);
+		create_submission(&s->ring, close_task);
+		task_free(task);
+		return true;
+	}
+	send_data_t *send_data = task_send_get_data(task);
+	send_data->sended_len += cqe->res;
+
+	if (send_data->sended_len < send_data->buf_len) {
+		// offset autoupdated by sended_len
+		create_submission(&s->ring, task);
+		return true;
+	}
+	task_t *recv_task = task_new_recv(task->fd, 8192);
+	create_submission(&s->ring, recv_task);
+	task_free(task);
+	return true;
+}
+
 // return false if error and mainloop should stoped
 static bool on_cqe(server_t *s, struct io_uring_cqe *cqe)
 {
 	task_t *task = io_uring_cqe_get_data(cqe);
 	switch (task->op) {
 	case OP_ACCEPT: {
-		if (cqe->res < 0) {
-			task_free(task);
-			return false;
-		}
-		task_t *recv_task = task_new_recv(cqe->res, 8192);
-		create_submission(&s->ring, recv_task);
-		break;
+		return on_cqe_accept(s, cqe);
 	}
 
 	case OP_CLOSE: {
 		fprintf(stdout, "closed fd = %d\n", task->fd);
 		task_free(task);
-		break;
+		return true;
 	}
 
 	case OP_RECV: {
-		if (cqe->res <= 0) {
-			task_t *close_task = task_new_close(task->fd);
-			create_submission(&s->ring, close_task);
-			task_free(task);
-			break;
-		}
-
-		recv_data_t *recv_data = task_recv_get_data(task);
-		recv_data->recvd_len += cqe->res;
-		task_t *send_task = task_new_send(task->fd, recv_data->buf,
-						  recv_data->recvd_len);
-		create_submission(&s->ring, send_task);
-		task_free(task);
-		break;
+		return on_cqe_recv(s, cqe);
 	}
 	case OP_SEND: {
-		if (cqe->res < 0) {
-			task_t *close_task = task_new_close(task->fd);
-			create_submission(&s->ring, close_task);
-			task_free(task);
-			break;
-		}
-		send_data_t *send_data = task_send_get_data(task);
-		send_data->sended_len += cqe->res;
-
-		if (send_data->sended_len < send_data->buf_len) {
-			create_submission(&s->ring, task);
-			break;
-		}
-		task_t *recv_task = task_new_recv(task->fd, 8192);
-		create_submission(&s->ring, recv_task);
-		task_free(task);
+		return on_cqe_send(s, cqe);
 	}
 	} // end switch
 	return true;
@@ -97,7 +144,7 @@ static bool on_cqe(server_t *s, struct io_uring_cqe *cqe)
 
 int server_init(server_t *s, const char *host, uint16_t port)
 {
-	int ret = io_uring_queue_init(128, &s->ring, 0);
+	int ret = io_uring_queue_init(1024, &s->ring, 0);
 	if (ret != 0) {
 		fprintf(stderr, "io uring init error\n");
 		return ret;

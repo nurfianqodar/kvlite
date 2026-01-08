@@ -3,7 +3,7 @@ CFLAGS	:= -Wall -Wextra -O3 -g
 CLIBS	:= -luring -ljemalloc
 
 TARGET	:= kvlite
-SRCS	:= kvlite.c util.c task.c server.c
+SRCS	:= kvlite.c util.c task.c server.c request.c
 OBJS	:= $(SRCS:.c=.o)
 
 all: $(TARGET)

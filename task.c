@@ -20,6 +20,10 @@ task_t *task_new_recv(int fd, size_t buf_len)
 	data->recvd_len = 0;
 	data->buf = umalloc(buf_len);
 
+	data->request.kind = REQUEST_KIND_UNDEF;
+	data->request.body_len = 0;
+	data->request.body = NULL;
+
 	task_t *task = umalloc(sizeof(task_t));
 	task->fd = fd;
 	task->op = OP_RECV;

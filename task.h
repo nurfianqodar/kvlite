@@ -1,6 +1,7 @@
 #ifndef TASK_H_
 #define TASK_H_
 
+#include "request.h"
 #include <liburing.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -22,6 +23,7 @@ typedef struct recv_data_s {
 	uint8_t *buf;
 	size_t buf_len;
 	size_t recvd_len;
+    request_t request;
 } recv_data_t;
 
 typedef struct task_s {
